@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, date
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 import os
 
@@ -17,7 +17,7 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
 
-ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "hawk-secret-2026")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "hawk-super-admin-2026")
 
 
 class Store(db.Model):
@@ -101,6 +101,41 @@ def get_final_store_status(store):
     return final_status
 
 
+def sqlite_column_exists(conn, table_name, column_name):
+    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    columns = [row[1] for row in rows]
+    return column_name in columns
+
+
+def ensure_sqlite_schema():
+    db.create_all()
+
+    engine = db.engine
+    if "sqlite" not in str(engine.url):
+        return
+
+    with engine.connect() as conn:
+        try:
+            if not sqlite_column_exists(conn, "store", "created_at"):
+                conn.execute(text("ALTER TABLE store ADD COLUMN created_at DATETIME"))
+                conn.execute(
+                    text("UPDATE store SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+                )
+        except Exception as e:
+            print(f"store.created_at migration skipped: {e}")
+
+        try:
+            if not sqlite_column_exists(conn, "device", "created_at"):
+                conn.execute(text("ALTER TABLE device ADD COLUMN created_at DATETIME"))
+                conn.execute(
+                    text("UPDATE device SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+                )
+        except Exception as e:
+            print(f"device.created_at migration skipped: {e}")
+
+        conn.commit()
+
+
 @app.route("/")
 def home():
     return json_success(message="license server running")
@@ -119,13 +154,8 @@ def check_license():
         return json_error("missing required fields", 400)
 
     store = Store.query.filter_by(store_id=store_id, license_key=license_key).first()
-
     if not store:
-        return json_error(
-            "invalid license",
-            404,
-            status="invalid"
-        )
+        return json_error("invalid license", 404, status="invalid")
 
     final_status = get_final_store_status(store)
 
@@ -260,6 +290,7 @@ def list_stores():
 
     stores = Store.query.order_by(Store.id.desc()).all()
     result = []
+
     for store in stores:
         item = store.to_dict()
         item["final_status"] = get_final_store_status(store)
@@ -274,8 +305,8 @@ def list_devices():
         return json_error("unauthorized", 401)
 
     store_id = normalize_text(request.args.get("store_id"))
-
     query = Device.query
+
     if store_id:
         query = query.filter_by(store_id=store_id)
 
@@ -336,7 +367,9 @@ def delete_store():
     return json_success(message="store deleted", store_id=store_id)
 
 
+with app.app_context():
+    ensure_sqlite_schema()
+
+
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
     app.run(host="0.0.0.0", port=5000, debug=True)
